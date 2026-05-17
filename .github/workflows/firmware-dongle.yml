@@ -42,6 +42,16 @@ jobs:
           repository: ${{ env.FIRMWARE_REPOSITORY }}
           ref: ${{ env.FIRMWARE_REF }}
 
+      - name: Use Zephyr 4.1 dongle screen module
+        run: |
+          awk '
+            $0 ~ /^[[:space:]]*- name: zmk-dongle-screen$/ { in_module = 1 }
+            in_module && $1 == "revision:" { sub(/main$/, "upgrade-4.1"); in_module = 0 }
+            { print }
+          ' config/west.yml > config/west.yml.tmp
+          mv config/west.yml.tmp config/west.yml
+          grep -A2 'name: zmk-dongle-screen' config/west.yml
+
       - name: Cache west modules
         uses: actions/cache@v5
         continue-on-error: true

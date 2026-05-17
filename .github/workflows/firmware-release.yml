@@ -1,0 +1,120 @@
+name: Firmware Release
+
+on:
+  workflow_run:
+    workflows:
+      - Firmware No Dongle
+      - Firmware Dongle
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: firmware-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish firmware release
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Find matching successful build runs
+        id: runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          find_run() {
+            local workflow_file="$1"
+            gh run list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --workflow "${workflow_file}" \
+              --limit 100 \
+              --json databaseId,headSha,status,conclusion,createdAt \
+              --jq ".[] | select(.headSha == \"${HEAD_SHA}\") | select(.status == \"completed\") | select(.conclusion == \"success\") | .databaseId" \
+              | head -n 1
+          }
+
+          no_dongle_run_id="$(find_run firmware-no-dongle.yml)"
+          dongle_run_id="$(find_run firmware-dongle.yml)"
+
+          if [[ -z "${no_dongle_run_id}" || -z "${dongle_run_id}" ]]; then
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+            echo "No release yet: both firmware workflows must succeed for ${HEAD_SHA}."
+            exit 0
+          fi
+
+          echo "ready=true" >> "${GITHUB_OUTPUT}"
+          echo "no_dongle_run_id=${no_dongle_run_id}" >> "${GITHUB_OUTPUT}"
+          echo "dongle_run_id=${dongle_run_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download firmware zips
+        if: ${{ steps.runs.outputs.ready == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          gh run download "${{ steps.runs.outputs.no_dongle_run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "totem-shift-no-dongle-${{ github.event.workflow_run.head_sha }}" \
+            --dir release-assets
+          gh run download "${{ steps.runs.outputs.dongle_run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "totem-shift-dongle-${{ github.event.workflow_run.head_sha }}" \
+            --dir release-assets
+
+          test -f release-assets/totem-shift-no-dongle.zip
+          test -f release-assets/totem-shift-dongle.zip
+
+      - name: Create GitHub release
+        if: ${{ steps.runs.outputs.ready == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${HEAD_SHA:0:7}"
+          tag="firmware-${HEAD_SHA}"
+          title="Firmware ${short_sha}"
+          notes_file="$(mktemp)"
+
+          {
+            echo "Automated firmware build for commit ${HEAD_SHA} on ${HEAD_BRANCH}."
+            echo
+            echo "Assets:"
+            echo "- totem-shift-no-dongle.zip: left and right firmware for a two-controller build."
+            echo "- totem-shift-dongle.zip: left, right, and dongle firmware for a three-controller build."
+          } > "${notes_file}"
+
+          if ! gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${HEAD_SHA}" \
+              --title "${title}" \
+              --notes-file "${notes_file}" \
+              --prerelease \
+              || true
+          fi
+
+          gh release edit "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${HEAD_SHA}" \
+            --title "${title}" \
+            --notes-file "${notes_file}" \
+            --prerelease
+
+          gh release upload "${tag}" \
+            release-assets/totem-shift-no-dongle.zip \
+            release-assets/totem-shift-dongle.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

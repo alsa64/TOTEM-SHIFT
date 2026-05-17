@@ -1,0 +1,132 @@
+name: Firmware Dongle
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FIRMWARE_REPOSITORY: Endracion/zmk-config-totem-shift
+  FIRMWARE_REF: totem
+  FIRMWARE_ZIP: totem-shift-dongle.zip
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ubuntu-latest
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: seeeduino_xiao_ble
+            shield: totem_left rgbled_adapter
+            artifact_name: totem_shift_left
+            cmake_args: -DCONFIG_ZMK_SPLIT=y -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=n
+          - board: seeeduino_xiao_ble
+            shield: totem_right rgbled_adapter
+            artifact_name: totem_shift_right
+            cmake_args: -DCONFIG_ZMK_SPLIT=y -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=n
+          - board: seeeduino_xiao_ble
+            shield: totem_dongle dongle_screen
+            artifact_name: totem_shift_dongle
+            snippet: studio-rpc-usb-uart
+            cmake_args: -DCONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS=8000 -DCONFIG_ZMK_STUDIO=y
+    steps:
+      - name: Checkout firmware config
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.FIRMWARE_REPOSITORY }}
+          ref: ${{ env.FIRMWARE_REF }}
+
+      - name: Cache west modules
+        uses: actions/cache@v5
+        continue-on-error: true
+        with:
+          path: |
+            bootloader
+            modules
+            tools
+            zephyr
+            zmk
+          key: ${{ runner.os }}-zmk-${{ env.FIRMWARE_REF }}-${{ hashFiles('config/west.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-zmk-${{ env.FIRMWARE_REF }}-
+            ${{ runner.os }}-zmk-
+
+      - name: Initialize west workspace
+        run: west init -l config
+
+      - name: Update west modules
+        run: west update --fetch-opt=--filter=tree:0
+
+      - name: Export Zephyr environment
+        run: west zephyr-export
+
+      - name: Build firmware
+        shell: bash
+        env:
+          BOARD: ${{ matrix.board }}
+          SHIELD: ${{ matrix.shield }}
+          SNIPPET: ${{ matrix.snippet }}
+          CMAKE_ARGS: ${{ matrix.cmake_args }}
+        run: |
+          set -euo pipefail
+
+          build_dir="$(mktemp -d)"
+          west_args=()
+          if [[ -n "${SNIPPET}" ]]; then
+            west_args=(-S "${SNIPPET}")
+          fi
+
+          west build \
+            -s zmk/app \
+            -d "${build_dir}" \
+            -b "${BOARD}" \
+            "${west_args[@]}" \
+            -- \
+            -DZMK_CONFIG="${GITHUB_WORKSPACE}/config" \
+            -DSHIELD="${SHIELD}" \
+            ${CMAKE_ARGS}
+
+          mkdir -p firmware
+          if [[ -f "${build_dir}/zephyr/zmk.uf2" ]]; then
+            cp "${build_dir}/zephyr/zmk.uf2" "firmware/${{ matrix.artifact_name }}.uf2"
+          elif [[ -f "${build_dir}/zephyr/zmk.bin" ]]; then
+            cp "${build_dir}/zephyr/zmk.bin" "firmware/${{ matrix.artifact_name }}.bin"
+          else
+            echo "No firmware binary produced" >&2
+            exit 1
+          fi
+
+      - name: Upload firmware part
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-part-${{ matrix.artifact_name }}
+          path: firmware/*
+          if-no-files-found: error
+
+  package:
+    name: Package dongle firmware
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download firmware parts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: firmware-part-*
+          path: firmware
+          merge-multiple: true
+
+      - name: Create firmware zip
+        run: zip -j "${FIRMWARE_ZIP}" firmware/*
+
+      - name: Upload firmware zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: totem-shift-dongle-${{ github.sha }}
+          path: ${{ env.FIRMWARE_ZIP }}
+          if-no-files-found: error

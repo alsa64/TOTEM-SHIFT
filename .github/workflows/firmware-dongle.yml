@@ -11,6 +11,8 @@ env:
   FIRMWARE_REPOSITORY: Endracion/zmk-config-totem-shift
   FIRMWARE_REF: totem
   FIRMWARE_ZIP: totem-shift-dongle.zip
+  MIRYOKU_REPOSITORY: manna-harbour/miryoku_zmk
+  MIRYOKU_REF: master
 
 jobs:
   build:
@@ -41,6 +43,20 @@ jobs:
         with:
           repository: ${{ env.FIRMWARE_REPOSITORY }}
           ref: ${{ env.FIRMWARE_REF }}
+
+      - name: Checkout Miryoku ZMK
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.MIRYOKU_REPOSITORY }}
+          ref: ${{ env.MIRYOKU_REF }}
+          path: miryoku_zmk
+
+      - name: Use Miryoku TOTEM keymap
+        run: |
+          rm -rf miryoku
+          cp -R miryoku_zmk/miryoku miryoku
+          cp miryoku_zmk/config/totem.keymap config/totem.keymap
+          grep -q '../miryoku/mapping/38/totem.h' config/totem.keymap
 
       - name: Use Zephyr 4.1 dongle screen module
         run: |
